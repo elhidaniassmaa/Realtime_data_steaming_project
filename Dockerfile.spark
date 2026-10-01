@@ -1,4 +1,19 @@
 FROM apache/spark:3.5.3-python3
+
 USER root
+
+# Driver Python utilisé par spark_stream.py pour créer keyspace et table
 RUN pip install --no-cache-dir cassandra-driver
+
+# Dossiers persistants : cache des jars et checkpoints Spark
+RUN mkdir -p /opt/ivy /opt/spark/checkpoints \
+    && chown -R spark:spark /opt/ivy /opt/spark/checkpoints
+
 USER spark
+
+# Pré-téléchargement des connecteurs Kafka et Cassandra au build :
+# plus de dépendance à internet à l'exécution
+RUN /opt/spark/bin/spark-shell \
+    --conf spark.jars.ivy=/opt/ivy \
+    --packages com.datastax.spark:spark-cassandra-connector_2.12:3.5.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3 \
+    < /dev/null

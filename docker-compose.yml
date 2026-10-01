@@ -1,13 +1,19 @@
+# Variables Airflow partagées par le webserver et le scheduler
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+
 services:
   postgres:
     image: postgres:15
     container_name: C_postgres
     environment:
-      POSTGRES_USER: airflow
-      POSTGRES_PASSWORD: airflow
-      POSTGRES_DB: airflow
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     healthcheck:
-      test: ['CMD', 'pg_isready', '-U', 'airflow']
+      test: ['CMD', 'pg_isready', '-U', '${POSTGRES_USER}']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -20,10 +26,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    environment: &airflow-env
-      AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
-      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    environment:
+      <<: *airflow-env
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
     volumes:
       - ./dags:/opt/airflow/dags
       - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh
@@ -172,6 +178,8 @@ services:
       start_period: 60s
     networks:
       - confluent
+
+  # Crée le topic puis s'arrête (exited 0). Idempotent grâce à --if-not-exists.
   kafka-init:
     image: confluentinc/cp-server:7.4.0
     container_name: C_kafka_init
@@ -195,13 +203,6 @@ services:
     command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
     environment:
       SPARK_MASTER_HOST: spark-master
-    depends_on:
-      cassandra:
-        condition: service_healthy
-      kafka-init:
-        condition: service_completed_successfully
-    volumes:
-      - ./spark_stream.py:/opt/spark_stream.py
     ports:
       - "9090:8080"
       - "7077:7077"
@@ -221,8 +222,38 @@ services:
     networks:
       - confluent
 
+  # Lance automatiquement le job de streaming Kafka -> Cassandra.
+  # Le driver tourne dans ce conteneur ; les jars sont déjà dans l'image (/opt/ivy).
+  spark-submit:
+    image: projet1-spark:3.5.3
+    pull_policy: never
+    container_name: C_spark_submit
+    depends_on:
+      spark-master:
+        condition: service_started
+      spark-worker:
+        condition: service_started
+      cassandra:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./spark_stream.py:/opt/spark_stream.py
+      - spark_checkpoints:/opt/spark/checkpoints
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --conf spark.jars.ivy=/opt/ivy
+      --conf spark.driver.host=spark-submit
+      --packages com.datastax.spark:spark-cassandra-connector_2.12:3.5.1,org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3
+      /opt/spark_stream.py
+    restart: on-failure
+    networks:
+      - confluent
+
 networks:
   confluent:
 
 volumes:
   cassandra_data:
+  spark_checkpoints:

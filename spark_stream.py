@@ -1,4 +1,5 @@
 import logging
+import sys
 
 from cassandra.cluster import Cluster
 from pyspark.sql import SparkSession
@@ -6,6 +7,9 @@ from pyspark.sql.functions import col, from_json
 from pyspark.sql.types import StructType, StructField, StringType
 
 logging.basicConfig(level=logging.INFO)
+
+# Volume Docker persistant (spark_checkpoints) : survit à la recréation du conteneur
+CHECKPOINT_PATH = "/opt/spark/checkpoints/created_users"
 
 
 def create_keyspace(session):
@@ -92,16 +96,21 @@ if __name__ == "__main__":
     session = create_cassandra_connection()
     spark = create_spark_connection()
 
-    if session is not None and spark is not None:
-        create_keyspace(session)
-        create_table(session)
+    # Code de sortie 1 en cas d'échec : sans cela, `restart: on-failure`
+    # ne relancerait pas le conteneur (un exit 0 est considéré comme un succès)
+    if session is None or spark is None:
+        logging.error("Initialisation impossible (Cassandra ou Spark), arrêt.")
+        sys.exit(1)
 
-        selection_df = create_selection_df_from_kafka(connect_to_kafka(spark))
+    create_keyspace(session)
+    create_table(session)
 
-        query = selection_df.writeStream \
-            .format("org.apache.spark.sql.cassandra") \
-            .option("checkpointLocation", "/tmp/checkpoint") \
-            .option("keyspace", "spark_streams") \
-            .option("table", "created_users") \
-            .start()
-        query.awaitTermination()
+    selection_df = create_selection_df_from_kafka(connect_to_kafka(spark))
+
+    query = selection_df.writeStream \
+        .format("org.apache.spark.sql.cassandra") \
+        .option("checkpointLocation", CHECKPOINT_PATH) \
+        .option("keyspace", "spark_streams") \
+        .option("table", "created_users") \
+        .start()
+    query.awaitTermination()
