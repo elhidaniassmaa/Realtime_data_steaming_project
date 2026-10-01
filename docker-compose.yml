@@ -24,16 +24,14 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres:5432/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-      _PIP_ADDITIONAL_REQUIREMENTS: kafka-python
     volumes:
       - ./dags:/opt/airflow/dags
+      - ./script/entrypoint.sh:/opt/airflow/script/entrypoint.sh
+      - ./requirements.txt:/opt/airflow/requirements.txt
+    entrypoint: ['bash', '/opt/airflow/script/entrypoint.sh']
+    command: webserver
     ports:
       - "8080:8080"
-    command: >
-      bash -c "airflow db migrate &&
-      airflow users create --username admin --password admin
-      --firstname Admin --lastname Admin --role Admin --email admin@example.com &&
-      airflow webserver"
     healthcheck:
       test: ['CMD', 'curl', '-f', 'http://localhost:8080/health']
       interval: 30s
@@ -52,9 +50,11 @@ services:
     environment: *airflow-env
     volumes:
       - ./dags:/opt/airflow/dags
-    command: scheduler
+      - ./requirements.txt:/opt/airflow/requirements.txt
+    command: bash -c "pip install -r /opt/airflow/requirements.txt && airflow scheduler"
     networks:
       - confluent
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     hostname: zookeeper
@@ -153,5 +153,75 @@ services:
     networks:
       - confluent
 
+  cassandra:
+    image: cassandra:4.1
+    container_name: C_cassandra
+    hostname: cassandra
+    ports:
+      - "9042:9042"
+    environment:
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ['CMD-SHELL', 'cqlsh -e "describe keyspaces" || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - confluent
+  kafka-init:
+    image: confluentinc/cp-server:7.4.0
+    depends_on:
+      broker:
+        condition: service_healthy
+    command: >
+      bash -c "kafka-topics --bootstrap-server broker:29092
+      --create --if-not-exists --topic user_created
+      --partitions 1 --replication-factor 1"
+    networks:
+      - confluent
+    restart: "no"
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: projet1-spark:3.5.3
+    container_name: C_spark_master
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      SPARK_MASTER_HOST: spark-master
+    depends_on:
+      cassandra:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./spark_stream.py:/opt/spark_stream.py
+    ports:
+      - "9090:8080"
+      - "7077:7077"
+    networks:
+      - confluent
+
+  spark-worker:
+    image: projet1-spark:3.5.3
+    pull_policy: never
+    container_name: C_spark_worker
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 1g
+    networks:
+      - confluent
+
 networks:
   confluent:
+
+volumes:
+  cassandra_data:

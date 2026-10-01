@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -17,6 +18,7 @@ def get_data():
 def format_data(res):
     location = res['location']
     return {
+        'id': str(uuid.uuid4()),
         'first_name': res['name']['first'],
         'last_name': res['name']['last'],
         'gender': res['gender'],
@@ -32,13 +34,27 @@ def format_data(res):
     }
 
 def stream_data():
-    import json
+    import json, time, logging
     from kafka import KafkaProducer
 
-    res = format_data(get_data())
     producer = KafkaProducer(bootstrap_servers=['broker:29092'], max_block_ms=5000)
-    producer.send('user_created', json.dumps(res).encode('utf-8'))
+    end_time = time.time() + 60
+    sent = 0
+
+    while time.time() < end_time:
+        try:
+            res = format_data(get_data())
+            producer.send('user_created', json.dumps(res).encode('utf-8'))
+            sent += 1
+            time.sleep(1)
+        except Exception as e:
+            logging.error(f"Error while streaming data: {e}")
+            time.sleep(2)
+
     producer.flush()
+    logging.info(f"{sent} messages envoyés")
+    if sent == 0:
+        raise RuntimeError("Aucun message envoyé : vérifier les logs")
 
 with DAG('user_automation',
          default_args=default_args,
